@@ -72,6 +72,7 @@ int main(int argc, char *argv[]) {
     // Convert the exit status to a value in a shell-like encoding
     if (WIFEXITED(exit_status)) { // terminated normally
         exit_status = WEXITSTATUS(exit_status) & 0x7F; // [0, 127]
+        printf("Try to print some SGX-related statistics.\n");
     } else { // killed by signal
         exit_status = 128 + WTERMSIG(exit_status); // [128 + 1, 128 + 64]
     }
