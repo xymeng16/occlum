@@ -1,0 +1,170 @@
+FROM alpine:3.11 AS alpine
+
+RUN apk update && \
+    apk --no-cache add openjdk11 --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
+
+# This image is equipped with the stripped SGX PSW, which is required by sgx-perf.
+# An environment to run sgx applications (DCAP drivers)
+FROM ubuntu:20.04
+
+RUN rm /bin/sh && ln -s /bin/bash /bin/sh
+
+# replace apt repo to a local one http://archive.ubuntu.com/ubuntu/ -> http://mirror.xtom.com.hk/ubuntu/
+RUN sed -i 's/http:\/\/archive.ubuntu.com\/ubuntu/http:\/\/mirror.xtom.com.hk\/ubuntu/g' /etc/apt/sources.list
+
+# install prerequisites
+RUN DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y software-properties-common && \
+    DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y git build-essential ocaml ocamlbuild automake autoconf libtool wget python-is-python3 libssl-dev git cmake perl vim libelf-dev libssl-dev libcurl4-openssl-dev protobuf-compiler libprotobuf-dev debhelper cmake reprepro unzip
+
+# from linux kernel 5.11, sgx-driver is enabled in-kernel    
+ARG NO_CACHE
+# Install SGX SDK/PSW
+WORKDIR /home/sgx/
+RUN git clone -b sgx_2.13.3_for_occlum_docker https://github.com/xymeng16/linux-sgx && \
+    mkdir /etc/init && \
+    cd linux-sgx && \
+    export DEB_BUILD_OPTIONS="nostrip"
+
+WORKDIR /home/sgx/linux-sgx
+RUN make preparation
+RUN cp external/toolset/ubuntu20.04/{as,ld,ld.gold,objdump} /usr/local/bin/
+RUN ./compile_and_install_docker.sh && \
+    echo 'source /opt/intel/sgxsdk/environment' >> /root/.bashrc
+RUN export DEB_BUILD_OPTIONS="nostrip" && echo $DEB_BUILD_OPTIONS && make deb_psw_pkg DEBUG=1
+
+WORKDIR /home/sgx/linux-sgx/linux/installer/deb/
+RUN dpkg -i libsgx-headers/libsgx-headers_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-enclave-common/libsgx-enclave-common_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-enclave-common/libsgx-enclave-common-dev_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-urts/libsgx-urts_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-launch/libsgx-launch_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-launch/libsgx-launch-dev_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-epid/libsgx-epid_2.13.103.1*deb && \
+    dpkg -i libsgx-epid/libsgx-epid-dev_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-quote-ex/libsgx-quote-ex_2.13.103.1*deb && \
+    dpkg -i libsgx-quote-ex/libsgx-quote-ex-dev_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-uae-service/libsgx-uae-service*.deb
+
+
+WORKDIR /home/sgx/linux-sgx/linux/installer/deb/sgx-aesm-service/
+RUN dpkg -i libsgx-ae-epid_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-ae-le_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-ae-pce_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i sgx-aesm-service_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-aesm-launch-plugin_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-pce-logic_1.10.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-aesm-pce-plugin_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-ae-qe3_1.10.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-qe3-logic_1.10.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-aesm-ecdsa-plugin_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-aesm-epid-plugin_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-aesm-quote-ex-plugin_2.13.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-dcap-quote-verify_1.10.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-dcap-quote-verify-dev_1.10.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-ae-qve_1.10.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-dcap-ql_1.10.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-dcap-ql-dev_1.10.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-dcap-default-qpl_1.10.103.1-focal1_amd64.deb && \
+    dpkg -i libsgx-dcap-default-qpl-dev_1.10.103.1-focal1_amd64.deb
+
+RUN apt-get update && DEBIAN_FRONTEND="noninteractive" apt-get install -y --no-install-recommends \
+        alien \
+        astyle \
+        autoconf \
+        automake \
+        bison \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        debhelper \
+        expect \
+        g++ \
+        gawk \
+        gdb \
+        git-core \
+        golang-go \
+        jq \
+        kmod \
+        lcov \
+        libboost-system-dev \
+        libboost-thread-dev \
+        libcurl4-openssl-dev \
+        libfuse-dev \
+        libjsoncpp-dev \
+        liblog4cpp5-dev \
+        libprotobuf-c-dev \
+        libprotobuf-dev \
+        libssl-dev \
+        libtool \
+        libxml2-dev \
+        nano \
+        ocaml \
+        ocamlbuild \
+        pkg-config \
+        protobuf-compiler \
+        python \
+        python3-pip \
+        sudo \
+        unzip \
+        uuid-dev \
+        vim \
+        wget \
+        zip \
+        gnupg \
+        aptitude \
+        && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install cpuid tool for tests
+WORKDIR /tmp
+RUN wget http://www.etallen.com/cpuid/cpuid-20200211.x86_64.tar.gz && \
+    tar -xf ./cpuid-20200211.x86_64.tar.gz && \
+    cp ./cpuid-20200211/cpuid /usr/bin/ && \
+    rm -rf /tmp/cpuid-20200211*
+
+# Install Rust
+ENV PATH="/root/.cargo/bin:$PATH"
+ENV OCCLUM_RUST_VERSION=nightly-2020-10-25
+RUN curl https://sh.rustup.rs -sSf | \
+        sh -s -- --default-toolchain ${OCCLUM_RUST_VERSION} -y && \
+    rm -rf /root/.cargo/registry && rm -rf /root/.cargo/git && \
+    cargo -V 
+
+# Install Occlum toolchain
+COPY occlum/tools/toolchains/musl-gcc /tmp/musl-gcc
+WORKDIR /tmp
+RUN cd musl-gcc && ./build.sh && ./install_zlib.sh && rm -rf /tmp/musl-gcc
+ENV PATH="/opt/occlum/build/bin:/usr/local/occlum/bin:$PATH"
+
+# Install glibc
+COPY occlum/tools/toolchains/glibc /tmp/glibc
+WORKDIR /tmp
+# RUN gcc -dumpversion
+RUN cd glibc && ./build.sh && rm -rf /tmp/glibc
+
+# Install Occlum Golang toolchain
+COPY occlum/tools/toolchains/golang /tmp/golang
+WORKDIR /tmp
+RUN cd golang && ./build.sh && rm -rf /tmp/golang
+ENV PATH="/opt/occlum/toolchains/golang/bin:$PATH"
+
+# Install Occlum Rust toolchain
+COPY occlum/tools/toolchains/rust /tmp/rust
+WORKDIR /tmp
+RUN cd rust && ./build.sh && rm -rf /tmp/rust
+ENV PATH="/opt/occlum/toolchains/rust/bin:$PATH"
+ENV LD_LIBRARY_PATH="/opt/intel/sgxsdk/sdk_libs"
+
+# Install Occlum Java toolchain (JDK 11)
+ARG JDK11_PATH=/opt/occlum/toolchains/jvm/java-11-openjdk
+COPY --from=alpine /usr/lib/jvm/java-11-openjdk $JDK11_PATH
+RUN rm $JDK11_PATH/lib/security/cacerts
+COPY --from=alpine /etc/ssl/certs/java/cacerts $JDK11_PATH/lib/security/cacerts
+COPY occlum/tools/toolchains/java /tmp/java
+WORKDIR /tmp
+RUN cd java && ./install_dragonwell.sh && rm -rf /tmp/java
+ENV PATH="/opt/occlum/toolchains/jvm/bin:$PATH"
+
+CMD [ "/bin/bash" ]
