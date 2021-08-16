@@ -94,6 +94,9 @@ __occlum_sysret:
 
     movq $ARCH_SET_FS, %rdi
     movq TASK_USER_FS(%r12), %rsi
+
+    lock incq %gs:(TASK_SYSCALL_CNT)
+
     call __arch_prctl
 
     popq %rdi

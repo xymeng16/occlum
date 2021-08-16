@@ -58,6 +58,8 @@ less than 4096 is unused by anyone. We can use it.*/
 #define TASK_USER_FS                (8 * 7)
 #define TASK_USER_ENTRY_ADDR        (8 * 8)
 
+#define TASK_SYSCALL_CNT            (8 * 9)
+
 /* arch_prctl syscall number and parameter */
 #define ARCH_PRCTL                  0x9E
 #define ARCH_SET_FS                 0x01002

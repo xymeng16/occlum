@@ -249,6 +249,7 @@ int occlum_pal_destroy(void) {
         ret = -1;
         PAL_WARN("Cannot destroy the enclave");
     }
+    PAL_INFO("TESSSSSSTT");
     return ret;
 }
 
