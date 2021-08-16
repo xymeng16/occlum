@@ -20,6 +20,7 @@ pub struct Task {
     user_stack_limit: usize,
     user_fs: AtomicUsize,
     user_entry_addr: usize,
+    ocall_cnt: usize,
     saved_state: usize, // struct jmpbuf*
 }
 
@@ -46,6 +47,7 @@ impl Task {
             user_stack_base,
             user_stack_limit,
             user_fs,
+            ocall_cnt: 0 as usize,
             ..Default::default()
         })
     }

@@ -47,6 +47,9 @@ pub fn exec(libos_tid: pid_t, host_tid: pid_t) -> Result<i32> {
         do_exec_task(this_thread.task() as *const Task as *mut Task);
     }
 
+    // Read the ocall counter and print
+    println!("OCALL_CNT: {}", this_thread.task().ocall_cnt);
+
     interrupt::disable_current_thread();
 
     let term_status = this_thread.inner().term_status().unwrap();

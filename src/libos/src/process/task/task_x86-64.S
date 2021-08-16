@@ -64,6 +64,7 @@ __exec_task:
     // Use user fsbase
     movq TASK_USER_FS(%rdi), %r10
     wrfsbase %r10
+    lock incq TASK_OCALL_CNT(%rdi)
 #endif
 
     // Use user stack
@@ -71,3 +72,5 @@ __exec_task:
     // Run user code
     movq TASK_USER_ENTRY_ADDR(%rdi), %r11
     jmp *%r11
+__err_ne:
+    ud2

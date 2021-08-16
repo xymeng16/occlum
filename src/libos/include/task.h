@@ -22,6 +22,7 @@ struct Task {
     uint64_t            user_stack_limit;
     uint64_t            user_fs;
     uint64_t            user_entry_addr;
+    uint64_t            ocall_cnt;
     jmp_buf*            saved_state;
 };
 
@@ -57,8 +58,7 @@ less than 4096 is unused by anyone. We can use it.*/
 #define TASK_USER_STACK_LIMIT       (8 * 6)
 #define TASK_USER_FS                (8 * 7)
 #define TASK_USER_ENTRY_ADDR        (8 * 8)
-
-#define TASK_SYSCALL_CNT            (8 * 9)
+#define TASK_OCALL_CNT              (8 * 9)
 
 /* arch_prctl syscall number and parameter */
 #define ARCH_PRCTL                  0x9E

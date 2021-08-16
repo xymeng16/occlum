@@ -75,7 +75,6 @@ int main(int argc, char *argv[]) {
     } else { // killed by signal
         exit_status = 128 + WTERMSIG(exit_status); // [128 + 1, 128 + 64]
     }
-    printf("Try to print some SGX-related statistics.\n");
     // Destroy Occlum PAL
     occlum_pal_destroy();
 

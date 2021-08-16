@@ -95,7 +95,7 @@ __occlum_sysret:
     movq $ARCH_SET_FS, %rdi
     movq TASK_USER_FS(%r12), %rsi
 
-    lock incq %gs:(TASK_SYSCALL_CNT)
+    //lock incq TASK_OCALL_CNT(%r12)
 
     call __arch_prctl
 
@@ -103,6 +103,7 @@ __occlum_sysret:
 #else // SGX_MODE_HW
     movq TASK_USER_FS(%r12), %r11
     wrfsbase %r11
+    lock incq TASK_OCALL_CNT(%r12)
 #endif
     // Restore flags first
     leaq (17*8)(%rdi), %rsp
