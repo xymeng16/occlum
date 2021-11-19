@@ -1,5 +1,6 @@
 use super::*;
 use crate::net::PollEventFlags;
+use rcore_fs::vfs::FallocateMode;
 use rcore_fs_sefs::dev::SefsMac;
 
 pub struct INodeFile {
@@ -13,7 +14,7 @@ pub struct INodeFile {
 impl File for INodeFile {
     fn read(&self, buf: &mut [u8]) -> Result<usize> {
         if !self.access_mode.readable() {
-            return_errno!(EACCES, "File not readable");
+            return_errno!(EBADF, "File not readable");
         }
         let mut offset = self.offset.lock().unwrap();
         let len = self.inode.read_at(*offset, buf).map_err(|e| errno!(e))?;
@@ -23,7 +24,7 @@ impl File for INodeFile {
 
     fn write(&self, buf: &[u8]) -> Result<usize> {
         if !self.access_mode.writable() {
-            return_errno!(EACCES, "File not writable");
+            return_errno!(EBADF, "File not writable");
         }
         let mut offset = self.offset.lock().unwrap();
         if self.status_flags.read().unwrap().always_append() {
@@ -37,7 +38,7 @@ impl File for INodeFile {
 
     fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
         if !self.access_mode.readable() {
-            return_errno!(EACCES, "File not readable");
+            return_errno!(EBADF, "File not readable");
         }
         let len = self.inode.read_at(offset, buf)?;
         Ok(len)
@@ -45,7 +46,7 @@ impl File for INodeFile {
 
     fn write_at(&self, offset: usize, buf: &[u8]) -> Result<usize> {
         if !self.access_mode.writable() {
-            return_errno!(EACCES, "File not writable");
+            return_errno!(EBADF, "File not writable");
         }
         let len = self.inode.write_at(offset, buf)?;
         Ok(len)
@@ -53,7 +54,7 @@ impl File for INodeFile {
 
     fn readv(&self, bufs: &mut [&mut [u8]]) -> Result<usize> {
         if !self.access_mode.readable() {
-            return_errno!(EACCES, "File not readable");
+            return_errno!(EBADF, "File not readable");
         }
         let mut offset = self.offset.lock().unwrap();
         let mut total_len = 0;
@@ -72,7 +73,7 @@ impl File for INodeFile {
 
     fn writev(&self, bufs: &[&[u8]]) -> Result<usize> {
         if !self.access_mode.writable() {
-            return_errno!(EACCES, "File not writable");
+            return_errno!(EBADF, "File not writable");
         }
         let mut offset = self.offset.lock().unwrap();
         if self.status_flags.read().unwrap().always_append() {
@@ -111,6 +112,11 @@ impl File for INodeFile {
         Ok(*offset as i64)
     }
 
+    fn position(&self) -> Result<off_t> {
+        let offset = self.offset.lock().unwrap();
+        Ok(*offset as off_t)
+    }
+
     fn metadata(&self) -> Result<Metadata> {
         let metadata = self.inode.metadata()?;
         Ok(metadata)
@@ -121,14 +127,18 @@ impl File for INodeFile {
         Ok(())
     }
 
-    fn fallocate(&self, mode: u32, offset: u64, len: u64) -> Result<()> {
-        self.inode.fallocate(mode, offset, len)?;
+    fn fallocate(&self, flags: FallocateFlags, offset: usize, len: usize) -> Result<()> {
+        if !self.access_mode.writable() {
+            return_errno!(EBADF, "File is not opened for writing");
+        }
+        let mode = FallocateMode::from(flags);
+        self.inode.fallocate(&mode, offset, len)?;
         Ok(())
     }
 
     fn set_len(&self, len: u64) -> Result<()> {
         if !self.access_mode.writable() {
-            return_errno!(EACCES, "File not writable. Can't set len.");
+            return_errno!(EBADF, "File not writable. Can't set len.");
         }
         self.inode.resize(len as usize)?;
         Ok(())
@@ -146,7 +156,7 @@ impl File for INodeFile {
 
     fn iterate_entries(&self, writer: &mut dyn DirentWriter) -> Result<usize> {
         if !self.access_mode.readable() {
-            return_errno!(EACCES, "File not readable. Can't read entry.");
+            return_errno!(EBADF, "File not readable. Can't read entry.");
         }
         let mut offset = self.offset.lock().unwrap();
         let mut dir_ctx = DirentWriterContext::new(*offset, writer);
@@ -177,30 +187,60 @@ impl File for INodeFile {
         Ok(())
     }
 
-    fn test_advisory_lock(&self, lock: &mut Flock) -> Result<()> {
-        // Let the advisory lock could be placed
-        // TODO: Implement the real advisory lock
-        lock.l_type = FlockType::F_UNLCK;
+    fn test_advisory_lock(&self, lock: &mut RangeLock) -> Result<()> {
+        let ext = match self.inode.ext() {
+            Some(ext) => ext,
+            None => {
+                warn!("Inode extension is not supportted, the lock could be placed");
+                lock.set_type(RangeLockType::F_UNLCK);
+                return Ok(());
+            }
+        };
+
+        match ext.get::<RangeLockList>() {
+            None => {
+                // The advisory lock could be placed if there is no lock list
+                lock.set_type(RangeLockType::F_UNLCK);
+            }
+            Some(range_lock_list) => {
+                range_lock_list.test_lock(lock);
+            }
+        }
         Ok(())
     }
 
-    fn set_advisory_lock(&self, lock: &Flock) -> Result<()> {
-        match lock.l_type {
-            FlockType::F_RDLCK => {
-                if !self.access_mode.readable() {
-                    return_errno!(EACCES, "File not readable");
-                }
-            }
-            FlockType::F_WRLCK => {
-                if !self.access_mode.writable() {
-                    return_errno!(EACCES, "File not writable");
-                }
-            }
-            _ => (),
+    fn set_advisory_lock(&self, lock: &RangeLock, is_nonblocking: bool) -> Result<()> {
+        if RangeLockType::F_UNLCK == lock.type_() {
+            return Ok(self.unlock_range_lock(lock));
         }
-        // Let the advisory lock could be acquired or released
-        // TODO: Implement the real advisory lock
-        Ok(())
+
+        self.check_advisory_lock_with_access_mode(lock)?;
+        let ext = match self.inode.ext() {
+            Some(ext) => ext,
+            None => {
+                warn!(
+                    "Inode extension is not supported, let the lock could be acquired or released"
+                );
+                // TODO: Implement inode extension for FS
+                return Ok(());
+            }
+        };
+        let range_lock_list = match ext.get::<RangeLockList>() {
+            Some(list) => list,
+            None => ext.get_or_put_default::<RangeLockList>(),
+        };
+
+        range_lock_list.set_lock(lock, is_nonblocking)
+    }
+
+    fn release_advisory_locks(&self) {
+        let range_lock = RangeLockBuilder::new()
+            .type_(RangeLockType::F_UNLCK)
+            .range(FileRange::new(0, OFFSET_MAX).unwrap())
+            .build()
+            .unwrap();
+
+        self.unlock_range_lock(&range_lock)
     }
 
     fn ioctl(&self, cmd: &mut IoctlCmd) -> Result<i32> {
@@ -263,6 +303,40 @@ impl INodeFile {
 
     pub fn abs_path(&self) -> &str {
         &self.abs_path
+    }
+
+    fn check_advisory_lock_with_access_mode(&self, lock: &RangeLock) -> Result<()> {
+        match lock.type_() {
+            RangeLockType::F_RDLCK => {
+                if !self.access_mode.readable() {
+                    return_errno!(EBADF, "File not readable");
+                }
+            }
+            RangeLockType::F_WRLCK => {
+                if !self.access_mode.writable() {
+                    return_errno!(EBADF, "File not writable");
+                }
+            }
+            _ => (),
+        }
+        Ok(())
+    }
+
+    fn unlock_range_lock(&self, lock: &RangeLock) {
+        let ext = match self.inode.ext() {
+            Some(ext) => ext,
+            None => {
+                return;
+            }
+        };
+        let range_lock_list = match ext.get::<RangeLockList>() {
+            Some(list) => list,
+            None => {
+                return;
+            }
+        };
+
+        range_lock_list.unlock(lock)
     }
 }
 

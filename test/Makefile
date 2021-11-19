@@ -2,6 +2,9 @@ CUR_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 PROJECT_DIR := $(realpath $(CUR_DIR)/../)
 SGX_MODE ?= HW
 
+# Repeat times for make test. Default to 1
+STRESS_TEST_TIMES ?= 1
+
 C_SRCS := $(wildcard */*.c */*.h)
 CXX_SRCS := $(wildcard */*.cc)
 
@@ -16,10 +19,10 @@ FAIL_LOG = $(BUILD_DIR)/test/.fail
 TEST_DEPS := client data_sink naughty_child
 # Tests: need to be compiled and run by test-% target
 TESTS ?= env empty hello_world malloc mmap file fs_perms getpid spawn sched pipe time timerfd \
-	truncate readdir mkdir open stat link symlink chmod chown tls pthread system_info resolv_conf rlimit \
-	server server_epoll unix_socket cout hostfs cpuid rdtsc device sleep exit_group \
+	truncate readdir mkdir open stat link symlink chmod chown tls pthread system_info rlimit \
+	server server_epoll unix_socket cout hostfs cpuid rdtsc device sleep exit_group flock \
 	ioctl fcntl eventfd emulate_syscall access signal sysinfo prctl rename procfs wait \
-	spawn_attribute exec statfs umask
+	spawn_attribute exec statfs random umask pgrp vfork
 # Benchmarks: need to be compiled and run by bench-% target
 BENCHES := spawn_and_exit_latency pipe_throughput unix_socket_throughput
 
@@ -67,30 +70,43 @@ postbuild:
 # Test targets
 #############################################################################
 
-test-glibc:
-	@OCCLUM_TEST_GLIBC=1 $(MAKE) test
+test:
+	@$(MAKE) test-common
 
-test: build pretest $(TEST_TARGETS) posttest
+test-glibc:
+	@OCCLUM_TEST_GLIBC=1 $(MAKE) test-common
+
+test-common:
+	@if [ -n "$(times)" ] && [ "$(times)" -eq "$(times)" ] 2>/dev/null; then \
+		export STRESS_TEST_TIMES=$(times); \
+	fi ; \
+	$(MAKE) test-internal
+
+test-internal: build pretest $(TEST_TARGETS) posttest
 
 pretest:
 	@$(RM) $(PASS_LOG) $(FAIL_LOG)
 	@cd $(BUILD_DIR)/test && \
 		$(BUILD_DIR)/bin/occlum start
 
+# Restart server if test failed
 $(TEST_TARGETS): test-%: %
 	@touch $(PASS_LOG) $(FAIL_LOG)
-	@$(ECHO) "$(CYAN)RUN TEST => $<$(NO_COLOR)"
-	@# Restart server if test failed
-	@$(MAKE) --no-print-directory -C $< test ; \
+	@for i in $$(seq 1 $(STRESS_TEST_TIMES)); \
+	do \
+		$(ECHO) "$(CYAN)RUN TEST => $<$(NO_COLOR)"; \
+		$(MAKE) --no-print-directory -C $< test ; \
 		if [ $$? -eq 0 ] ; then \
-			$(ECHO) "$(GREEN)PASS$(NO_COLOR)" ; \
-			$(ECHO) "$< PASS" >> $(PASS_LOG) ; \
+			$(ECHO) "$(GREEN)PASS $(NO_COLOR)" ; \
+			$(ECHO) "$< PASS $$i" >> $(PASS_LOG) ; \
 		else \
 			$(ECHO) "$(RED)FAILED$(NO_COLOR)" ; \
-			$(ECHO) "$< FAILED" >> $(FAIL_LOG) ; \
+			$(ECHO) "$< FAILED $$i" >> $(FAIL_LOG) ; \
 			cd $(BUILD_DIR)/test && \
 			$(BUILD_DIR)/bin/occlum start ; \
-		fi ;
+			cd -; \
+		fi ; \
+	done
 
 posttest:
 	@cd $(BUILD_DIR)/test && \
@@ -100,6 +116,9 @@ posttest:
 		$(ECHO) "\nTotal:" ; \
 		$(ECHO) "$(GREEN)PASS: $$PASS_NUM  $(RED)FAILED: $$FAIL_NUM $(NO_COLOR)" ; \
 		if [ $$FAIL_NUM -ne 0 ] ; then \
+			$(ECHO) "\nFAILED TESTS:$(RED)" ; \
+			cat $(FAIL_LOG); \
+			$(ECHO) "$(NO_COLOR)====================="; \
 			exit 1; \
 		fi ;
 

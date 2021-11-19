@@ -1,11 +1,16 @@
 use super::*;
 use rcore_fs::vfs::FsInfo;
+use std::convert::TryFrom;
+use std::ffi::CString;
 
 pub fn do_fstatfs(fd: FileDesc) -> Result<Statfs> {
     debug!("fstatfs: fd: {}", fd);
 
     let file_ref = current!().file(fd)?;
-    let statfs = Statfs::from(file_ref.fs()?.info());
+    let statfs = {
+        let fs_info = file_ref.fs()?.info();
+        Statfs::try_from(fs_info)?
+    };
     trace!("fstatfs result: {:?}", statfs);
     Ok(statfs)
 }
@@ -18,12 +23,15 @@ pub fn do_statfs(path: &str) -> Result<Statfs> {
         let fs = current.fs().read().unwrap();
         fs.lookup_inode(path)?
     };
-    let statfs = Statfs::from(inode.fs().info());
+    let statfs = {
+        let fs_info = inode.fs().info();
+        Statfs::try_from(fs_info)?
+    };
     trace!("statfs result: {:?}", statfs);
     Ok(statfs)
 }
 
-#[derive(Debug)]
+#[derive(Default, Debug)]
 #[repr(C)]
 pub struct Statfs {
     /// Type of filesystem
@@ -52,29 +60,75 @@ pub struct Statfs {
     f_spare: [usize; 4],
 }
 
-impl From<FsInfo> for Statfs {
-    fn from(info: FsInfo) -> Self {
-        Self {
-            f_type: match info.magic {
-                // The "/dev" and "/dev/shm" are tmpfs on Linux, so we transform the
-                // magic number to TMPFS_MAGIC.
-                rcore_fs_ramfs::RAMFS_MAGIC | rcore_fs_devfs::DEVFS_MAGIC => {
-                    const TMPFS_MAGIC: usize = 0x0102_1994;
-                    TMPFS_MAGIC
-                }
-                val => val,
-            },
-            f_bsize: info.bsize,
-            f_blocks: info.blocks,
-            f_bfree: info.bfree,
-            f_bavail: info.bavail,
-            f_files: info.files,
-            f_ffree: info.ffree,
-            f_fsid: [0i32; 2],
-            f_namelen: info.namemax,
-            f_frsize: info.frsize,
-            f_flags: 0,
-            f_spare: [0usize; 4],
+impl Statfs {
+    fn validate(&self) -> Result<()> {
+        if self.f_blocks < self.f_bfree || self.f_blocks < self.f_bavail {
+            return_errno!(EINVAL, "invalid blocks");
         }
+        if self.f_files < self.f_ffree {
+            return_errno!(EINVAL, "invalid inodes");
+        }
+        if self.f_bsize == 0 || self.f_namelen == 0 || self.f_frsize == 0 {
+            return_errno!(EINVAL, "invalid non-zero fields");
+        }
+        Ok(())
     }
+}
+
+impl TryFrom<FsInfo> for Statfs {
+    type Error = error::Error;
+
+    fn try_from(info: FsInfo) -> Result<Self> {
+        let statfs = if info.magic == rcore_fs_unionfs::UNIONFS_MAGIC
+            || info.magic == rcore_fs_sefs::SEFS_MAGIC as usize
+        {
+            let mut host_statfs = host_statfs()?;
+            host_statfs.f_type = info.magic;
+            host_statfs
+        } else {
+            Self {
+                f_type: match info.magic {
+                    // The "/dev" and "/dev/shm" are tmpfs on Linux, so we transform the
+                    // magic number to TMPFS_MAGIC.
+                    rcore_fs_ramfs::RAMFS_MAGIC | rcore_fs_devfs::DEVFS_MAGIC => {
+                        const TMPFS_MAGIC: usize = 0x0102_1994;
+                        TMPFS_MAGIC
+                    }
+                    val => val,
+                },
+                f_bsize: info.bsize,
+                f_blocks: info.blocks,
+                f_bfree: info.bfree,
+                f_bavail: info.bavail,
+                f_files: info.files,
+                f_ffree: info.ffree,
+                f_fsid: [0i32; 2],
+                f_namelen: info.namemax,
+                f_frsize: info.frsize,
+                f_flags: 0,
+                f_spare: [0usize; 4],
+            }
+        };
+        Ok(statfs)
+    }
+}
+
+fn host_statfs() -> Result<Statfs> {
+    extern "C" {
+        fn occlum_ocall_statfs(ret: *mut i32, path: *const i8, buf: *mut Statfs) -> sgx_status_t;
+    }
+
+    let mut ret: i32 = 0;
+    let mut statfs: Statfs = Default::default();
+    let host_dir = unsafe { CString::new(INSTANCE_DIR.as_bytes()).unwrap() };
+    let sgx_status = unsafe { occlum_ocall_statfs(&mut ret, host_dir.as_ptr(), &mut statfs) };
+    assert!(sgx_status == sgx_status_t::SGX_SUCCESS);
+    assert!(ret == 0 || libc::errno() == Errno::EINTR as i32);
+    if ret != 0 {
+        return_errno!(EINTR, "failed to get host statfs");
+    }
+
+    // do sanity check
+    statfs.validate().expect("invalid statfs");
+    Ok(statfs)
 }

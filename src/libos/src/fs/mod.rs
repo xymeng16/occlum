@@ -19,10 +19,13 @@ pub use self::event_file::{AsEvent, EventCreationFlags, EventFile};
 pub use self::events::{AtomicIoEvents, IoEvents, IoNotifier};
 pub use self::file::{File, FileRef};
 pub use self::file_ops::{
-    occlum_ocall_ioctl, AccessMode, BuiltinIoctlNum, CreationFlags, FileMode, Flock, FlockType,
+    occlum_ocall_ioctl, AccessMode, BuiltinIoctlNum, CreationFlags, FallocateFlags, FileMode,
     IfConf, IoctlCmd, Stat, StatusFlags, StructuredIoctlArgType, StructuredIoctlNum,
 };
 pub use self::file_table::{FileDesc, FileTable, FileTableEvent, FileTableNotifier};
+pub use self::flock::{
+    FileRange, RangeLock, RangeLockBuilder, RangeLockList, RangeLockType, OFFSET_MAX,
+};
 pub use self::fs_ops::Statfs;
 pub use self::fs_view::FsView;
 pub use self::host_fd::HostFd;
@@ -40,6 +43,7 @@ mod events;
 mod file;
 mod file_ops;
 mod file_table;
+mod flock;
 mod fs_ops;
 mod fs_view;
 mod host_fd;

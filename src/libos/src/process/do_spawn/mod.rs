@@ -13,6 +13,7 @@ use crate::fs::{
     CreationFlags, File, FileDesc, FileMode, FileTable, FsView, HostStdioFds, StdinFile, StdoutFile,
 };
 use crate::prelude::*;
+use crate::process::pgrp::{get_spawn_attribute_pgrp, update_pgrp_for_new_process};
 use crate::vm::ProcessVM;
 
 mod aux_vec;
@@ -117,6 +118,7 @@ fn new_process(
         host_stdio_fds,
         current_ref,
         None,
+        None,
     )?;
     table::add_process(new_process_ref.clone());
     table::add_thread(new_process_ref.main_thread().unwrap());
@@ -130,6 +132,8 @@ pub fn new_process_for_exec(
     argv: &[CString],
     envp: &[CString],
     current_ref: &ThreadRef,
+    reuse_tid: Option<ThreadId>,
+    parent_process: Option<ProcessRef>,
 ) -> Result<ProcessRef> {
     let tid = ThreadId {
         tid: current_ref.process().pid() as u32,
@@ -142,7 +146,8 @@ pub fn new_process_for_exec(
         None,
         None,
         current_ref,
-        Some(tid),
+        reuse_tid,
+        parent_process,
     )?;
 
     Ok(new_process_ref)
@@ -157,6 +162,7 @@ fn new_process_common(
     host_stdio_fds: Option<&HostStdioFds>,
     current_ref: &ThreadRef,
     reuse_tid: Option<ThreadId>,
+    parent_process: Option<ProcessRef>,
 ) -> Result<ProcessRef> {
     let mut argv = argv.clone().to_vec();
     let (is_script, elf_inode, mut elf_buf, elf_header) =
@@ -227,7 +233,12 @@ fn new_process_common(
             };
             let user_stack_base = vm.get_stack_base();
             let user_stack_limit = vm.get_stack_limit();
-            let user_rsp = init_stack::do_init(user_stack_base, 4096, &argv, envp, &mut auxvec)?;
+            let init_stack_size = min(
+                max(vm.get_stack_range().size() >> 8, 4096),
+                vm.get_stack_range().size(),
+            ); // size in [4096, stack_range], by default 1/256 of stack range
+            let user_rsp =
+                init_stack::do_init(user_stack_base, init_stack_size, &argv, envp, &mut auxvec)?;
             unsafe {
                 Task::new(
                     ldso_entry,
@@ -240,7 +251,7 @@ fn new_process_common(
         };
         let vm_ref = Arc::new(vm);
         let files_ref = {
-            let files = init_files(current_ref, file_actions, host_stdio_fds)?;
+            let files = init_files(current_ref, file_actions, host_stdio_fds, &reuse_tid)?;
             Arc::new(SgxMutex::new(files))
         };
         let fs_ref = Arc::new(RwLock::new(current_ref.fs().read().unwrap().clone()));
@@ -269,20 +280,30 @@ fn new_process_common(
         }
         trace!("new process sig_dispositions = {:?}", sig_dispositions);
 
+        // Check for process group spawn attribute. This must be done before building the new process.
+        let new_pgid = get_spawn_attribute_pgrp(spawn_attributes)?;
+        // Use parent process's process group by default.
+        let pgrp_ref = process_ref.pgrp();
+
         // Make the default thread name to be the process's corresponding elf file name
         let elf_name = elf_path.rsplit('/').collect::<Vec<&str>>()[0];
         let thread_name = ThreadName::new(elf_name);
 
-        let mut parent;
         let mut process_builder = ProcessBuilder::new();
-        if reuse_tid.is_some() {
-            process_builder = process_builder.tid(reuse_tid.unwrap());
-            parent = current!().process().parent();
-        } else {
-            parent = process_ref;
+
+        // Use specified tid if any
+        if let Some(reuse_tid) = reuse_tid {
+            process_builder = process_builder.tid(reuse_tid);
         }
 
-        process_builder
+        // Use specified parent process if any
+        let parent = if let Some(parent) = parent_process {
+            parent
+        } else {
+            process_ref
+        };
+
+        let new_process = process_builder
             .vm(vm_ref)
             .exec_path(&elf_path)
             .umask(parent.umask())
@@ -291,11 +312,17 @@ fn new_process_common(
             .sched(sched_ref)
             .rlimits(rlimit_ref)
             .fs(fs_ref)
+            .pgrp(pgrp_ref)
             .files(files_ref)
             .sig_mask(sig_mask)
             .name(thread_name)
             .sig_dispositions(sig_dispositions)
-            .build()?
+            .build()?;
+
+        // This is done here becuase if we want to create a new process group, we must have a new process first.
+        // So we can't set "pgrp" during the build above.
+        update_pgrp_for_new_process(new_process.clone(), new_pgid)?;
+        new_process
     };
 
     info!(
@@ -325,12 +352,25 @@ fn init_files(
     current_ref: &ThreadRef,
     file_actions: &[FileAction],
     host_stdio_fds: Option<&HostStdioFds>,
+    reuse_tid: &Option<ThreadId>,
 ) -> Result<FileTable> {
     // Usually, we just inherit the file table from the current process
     let should_inherit_file_table = current_ref.process().pid() > 0;
     if should_inherit_file_table {
         // Fork: clone file table
         let mut cloned_file_table = current_ref.files().lock().unwrap().clone();
+
+        // By default, file descriptors remain open across an execve().
+        // File descriptors that are marked close-on-exec are closed, which will cause
+        // the release of advisory locks owned by current process.
+        if reuse_tid.is_some() {
+            let closed_files = cloned_file_table.close_on_spawn();
+            for file in closed_files {
+                file.release_advisory_locks();
+            }
+            return Ok(cloned_file_table);
+        }
+
         // Perform file actions to modify the cloned file table
         for file_action in file_actions {
             match file_action {

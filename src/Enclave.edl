@@ -103,7 +103,6 @@ enclave {
          */
         public int occlum_ecall_kill(int pid, int sig);
 
-
         /*
          * Broadcast interrupts to LibOS threads.
          *
@@ -152,6 +151,8 @@ enclave {
         int occlum_ocall_timerfd_gettime(int fd, [out] struct itimerspec* curr_value) propagate_errno;
 
         void occlum_ocall_sync(void);
+
+        int occlum_ocall_statfs([in, string] const char* path, [out] struct statfs* buf) propagate_errno;
 
         void* occlum_ocall_posix_memalign(size_t alignment, size_t size);
         void occlum_ocall_free([user_check] void* ptr);

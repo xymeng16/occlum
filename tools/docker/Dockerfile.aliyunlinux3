@@ -19,6 +19,7 @@ RUN yum install -y --nogpgcheck \
         bzip2 \
         boost-devel \
         ca-certificates \
+        clang \
         cmake \
         curl \
         curl-devel \
@@ -66,7 +67,8 @@ RUN yum install -y --nogpgcheck \
         protobuf-compiler \
         protobuf-c-compiler \
         protobuf-c-devel \
-        protobuf-devel && \
+        protobuf-devel \
+        rsync && \
     yum groupinstall -y 'Development Tools' && \
     yum clean all && \
     alternatives --set python /usr/bin/python3
@@ -75,7 +77,7 @@ RUN yum install -y --nogpgcheck \
 
 # Install PSW and DCAP RPM packages
 WORKDIR /tmp
-RUN wget https://mirrors.openanolis.org/inclavare-containers/alinux3/sgx_rpm_local_repo.tar.gz && \
+RUN wget https://mirrors.openanolis.cn/inclavare-containers/alinux3/sgx-2.14/sgx_rpm_local_repo.tar.gz && \
     tar -xzf sgx_rpm_local_repo.tar.gz && \
     rm -f sgx_rpm_local_repo.tar.gz && \
     cd /tmp/sgx_rpm_local_repo && \
@@ -105,10 +107,10 @@ RUN wget https://mirrors.openanolis.org/inclavare-containers/alinux3/sgx_rpm_loc
 
 # Install SGX SDK
 WORKDIR /tmp
-RUN git clone -b sgx_2.13.3_for_occlum https://github.com/occlum/linux-sgx && \
+RUN git clone -b sgx_2.14_for_occlum https://github.com/occlum/linux-sgx && \
     cd linux-sgx && \
     make preparation && \
-    ./compile_and_install.sh no_mitigation USE_OPT_LIBS=2 && \
+    ./compile_and_install.sh no_mitigation USE_OPT_LIBS=3 && \
     echo 'source /opt/intel/sgxsdk/environment' >> /root/.bashrc && \
     rm -rf /tmp/linux-sgx
 
@@ -119,32 +121,27 @@ RUN wget http://www.etallen.com/cpuid/cpuid-20200211.x86_64.tar.gz && \
     cp ./cpuid-20200211/cpuid /usr/bin/ && \
     rm -rf /tmp/cpuid-20200211*
 
+
+# Download the Occlum source
+ARG OCCLUM_BRANCH
+WORKDIR /root
+RUN git clone -b $OCCLUM_BRANCH https://github.com/occlum/occlum && \
+    cp -r /root/occlum/tools/toolchains/* /tmp/ && mkdir -p /opt/occlum/ && \
+    cp /root/occlum/tools/docker/start_aesm.sh /opt/occlum/
+
 # Install Occlum toolchain
-COPY toolchains/musl-gcc /tmp/musl-gcc
 WORKDIR /tmp
 RUN cd musl-gcc && ./build.sh && ./install_zlib.sh && rm -rf /tmp/musl-gcc
 ENV PATH="/opt/occlum/build/bin:/usr/local/occlum/bin:$PATH"
 
 # Install glibc
-COPY toolchains/glibc /tmp/glibc
 WORKDIR /tmp
 RUN cd glibc && ./build.sh && rm -rf /tmp/glibc
 
 # Install Occlum Golang toolchain
-COPY toolchains/golang /tmp/golang
 WORKDIR /tmp
-RUN yum install -y go && cd golang && ./build.sh && rm -rf /tmp/golang
-ENV PATH="/usr/local/occlum/golang/bin:$PATH"
-
-# Install Occlum Java toolchain (JDK 11)
-ARG JDK11_PATH=/opt/occlum/toolchains/jvm/java-11-openjdk
-COPY --from=alpine /usr/lib/jvm/java-11-openjdk $JDK11_PATH
-RUN rm $JDK11_PATH/lib/security/cacerts
-COPY --from=alpine /etc/ssl/certs/java/cacerts $JDK11_PATH/lib/security/cacerts
-COPY toolchains/java /tmp/java
-WORKDIR /tmp
-RUN cd java && ./install_dragonwell.sh && rm -rf /tmp/java
-ENV PATH="/opt/occlum/toolchains/jvm/bin:$PATH"
+RUN cd golang && ./build.sh && rm -rf /tmp/golang
+ENV PATH="/opt/occlum/toolchains/golang/bin:$PATH"
 
 # Install Rust
 ENV PATH="/root/.cargo/bin:$PATH"
@@ -155,18 +152,32 @@ RUN curl https://sh.rustup.rs -sSf | \
     cargo -V
 
 # Install Occlum Rust toolchain
-COPY toolchains/rust /tmp/rust
 WORKDIR /tmp
 RUN cd rust && ./build.sh && rm -rf /tmp/rust
 ENV PATH="/opt/occlum/toolchains/rust/bin:$PATH"
 
-ARG OCCLUM_BRANCH
+# Install Occlum bash
+WORKDIR /tmp
+RUN cd bash && ./build.sh && rm -rf /tmp/bash
+
+# Install Occlum busybox
+WORKDIR /tmp
+RUN cd busybox && ./build.sh && rm -rf /tmp/busybox
+
+# Install Occlum Java toolchain (JDK 11)
+ARG JDK11_PATH=/opt/occlum/toolchains/jvm/java-11-openjdk
+COPY --from=alpine /usr/lib/jvm/java-11-openjdk $JDK11_PATH
+RUN rm $JDK11_PATH/lib/security/cacerts
+COPY --from=alpine /etc/ssl/certs/java/cacerts $JDK11_PATH/lib/security/cacerts
+WORKDIR /tmp
+RUN cd java && ./install_dragonwell.sh && rm -rf /tmp/java
+ENV PATH="/opt/occlum/toolchains/jvm/bin:$PATH"
+
+
 ENV LD_LIBRARY_PATH="/opt/intel/sgxpsw/aesm:/usr/lib64/:/usr/local/lib:/opt/intel/sgxsdk/sdk_libs:/usr/lib:$LD_LIBRARY_PATH"
-# Install the latest version of Occlum
-WORKDIR /root/occlum
-RUN rm -rf occlum && \
-    git clone -b $OCCLUM_BRANCH https://github.com/occlum/occlum && \
-    cd occlum && \
+# Build and install Occlum
+WORKDIR /root
+RUN cd occlum && \
     source /opt/intel/sgxsdk/environment && \
     make submodule && \
     OCCLUM_RELEASE_BUILD=1 make install && \
@@ -178,7 +189,6 @@ RUN rm -rf occlum && \
 # To do so, we add the script to ~/.bashrc. We cannot use systemd to run AESM
 # as a "real" service since the pid 1 is not systemd in Docker. So we start
 # up AESM service when an user login with an interative shell.
-COPY docker/start_aesm.sh /opt/occlum/
-RUN mkdir -p /var/run/aesmd && echo 'sudo /opt/occlum/start_aesm.sh' >> /root/.bashrc
+RUN mkdir -p /var/run/aesmd && echo '/opt/occlum/start_aesm.sh' >> /root/.bashrc
 
 WORKDIR /root

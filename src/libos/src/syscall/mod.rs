@@ -34,7 +34,7 @@ use crate::fs::{
     Stat, Statfs,
 };
 use crate::interrupt::{do_handle_interrupt, sgx_interrupt_info_t};
-use crate::misc::{resource_t, rlimit_t, sysinfo_t, utsname_t};
+use crate::misc::{resource_t, rlimit_t, sysinfo_t, utsname_t, RandFlags};
 use crate::net::{
     do_accept, do_accept4, do_bind, do_connect, do_epoll_create, do_epoll_create1, do_epoll_ctl,
     do_epoll_pwait, do_epoll_wait, do_getpeername, do_getsockname, do_getsockopt, do_listen,
@@ -43,10 +43,10 @@ use crate::net::{
 };
 use crate::process::{
     do_arch_prctl, do_clone, do_execve, do_exit, do_exit_group, do_futex, do_get_robust_list,
-    do_getegid, do_geteuid, do_getgid, do_getgroups, do_getpgid, do_getpid, do_getppid, do_gettid,
-    do_getuid, do_prctl, do_set_robust_list, do_set_tid_address, do_spawn_for_glibc,
-    do_spawn_for_musl, do_wait4, pid_t, posix_spawnattr_t, FdOp, RobustListHead, SpawnFileActions,
-    ThreadStatus,
+    do_getegid, do_geteuid, do_getgid, do_getgroups, do_getpgid, do_getpgrp, do_getpid, do_getppid,
+    do_gettid, do_getuid, do_prctl, do_set_robust_list, do_set_tid_address, do_setpgid,
+    do_spawn_for_glibc, do_spawn_for_musl, do_vfork, do_wait4, pid_t, posix_spawnattr_t, FdOp,
+    RobustListHead, SpawnFileActions, ThreadStatus,
 };
 use crate::sched::{do_getcpu, do_sched_getaffinity, do_sched_setaffinity, do_sched_yield};
 use crate::signal::{
@@ -146,8 +146,8 @@ macro_rules! process_syscall_table_with_callback {
             (Getsockopt = 55) => do_getsockopt(fd: c_int, level: c_int, optname: c_int, optval: *mut c_void, optlen: *mut libc::socklen_t),
             (Clone = 56) => do_clone(flags: u32, stack_addr: usize, ptid: *mut pid_t, ctid: *mut pid_t, new_tls: usize),
             (Fork = 57) => handle_unsupported(),
-            (Vfork = 58) => handle_unsupported(),
-            (Execve = 59) => do_execve(path: *const i8, argv: *const *const i8, envp: *const *const i8),
+            (Vfork = 58) => do_vfork(context: *mut CpuContext),
+            (Execve = 59) => do_execve(path: *const i8, argv: *const *const i8, envp: *const *const i8, context: *mut CpuContext),
             (Exit = 60) => do_exit(exit_status: i32),
             (Wait4 = 61) => do_wait4(pid: i32, _exit_status: *mut i32, options: u32),
             (Kill = 62) => do_kill(pid: i32, sig: c_int),
@@ -197,9 +197,9 @@ macro_rules! process_syscall_table_with_callback {
             (Setgid = 106) => handle_unsupported(),
             (Geteuid = 107) => do_geteuid(),
             (Getegid = 108) => do_getegid(),
-            (Setpgid = 109) => handle_unsupported(),
+            (Setpgid = 109) => do_setpgid(pid: i32, pgid: i32),
             (Getppid = 110) => do_getppid(),
-            (Getpgrp = 111) => handle_unsupported(),
+            (Getpgrp = 111) => do_getpgrp(),
             (Setsid = 112) => handle_unsupported(),
             (Setreuid = 113) => handle_unsupported(),
             (Setregid = 114) => handle_unsupported(),
@@ -209,7 +209,7 @@ macro_rules! process_syscall_table_with_callback {
             (Getresuid = 118) => handle_unsupported(),
             (Setresgid = 119) => handle_unsupported(),
             (Getresgid = 120) => handle_unsupported(),
-            (Getpgid = 121) => do_getpgid(),
+            (Getpgid = 121) => do_getpgid(pid: i32),
             (Setfsuid = 122) => handle_unsupported(),
             (Setfsgid = 123) => handle_unsupported(),
             (Getsid = 124) => handle_unsupported(),
@@ -319,7 +319,7 @@ macro_rules! process_syscall_table_with_callback {
             (ClockGettime = 228) => do_clock_gettime(clockid: clockid_t, ts_u: *mut timespec_t),
             (ClockGetres = 229) => do_clock_getres(clockid: clockid_t, res_u: *mut timespec_t),
             (ClockNanosleep = 230) => handle_unsupported(),
-            (ExitGroup = 231) => do_exit_group(exit_status: i32),
+            (ExitGroup = 231) => do_exit_group(exit_status: i32, user_context: *mut CpuContext),
             (EpollWait = 232) => do_epoll_wait(epfd: c_int, events: *mut libc::epoll_event, maxevents: c_int, timeout: c_int),
             (EpollCtl = 233) => do_epoll_ctl(epfd: c_int, op: c_int, fd: c_int, event: *const libc::epoll_event),
             (Tgkill = 234) => do_tgkill(pid: i32, tid: pid_t, sig: c_int),
@@ -406,7 +406,7 @@ macro_rules! process_syscall_table_with_callback {
             (SchedGetattr = 315) => handle_unsupported(),
             (Renameat2 = 316) => handle_unsupported(),
             (Seccomp = 317) => handle_unsupported(),
-            (Getrandom = 318) => handle_unsupported(),
+            (Getrandom = 318) => do_getrandom(buf: *mut u8, len: size_t, flags: u32),
             (MemfdCreate = 319) => handle_unsupported(),
             (KexecFileLoad = 320) => handle_unsupported(),
             (Bpf = 321) => handle_unsupported(),
@@ -631,6 +631,16 @@ fn do_syscall(user_context: &mut CpuContext) {
         // need to modify it
         if syscall_num == SyscallNum::RtSigreturn {
             syscall.args[0] = user_context as *mut _ as isize;
+        } else if syscall_num == SyscallNum::Vfork {
+            syscall.args[0] = user_context as *mut _ as isize;
+        } else if syscall_num == SyscallNum::Execve {
+            // syscall.args[0] == path
+            // syscall.args[1] == argv
+            // syscall.args[2] == envp
+            syscall.args[3] = user_context as *mut _ as isize;
+        } else if syscall_num == SyscallNum::ExitGroup {
+            // syscall.args[0] == status
+            syscall.args[1] = user_context as *mut _ as isize;
         } else if syscall_num == SyscallNum::HandleException {
             // syscall.args[0] == info
             // syscall.args[1] == fpregs
@@ -700,7 +710,7 @@ fn do_syscall(user_context: &mut CpuContext) {
             retval
         }
     };
-    trace!("Retval = {:?}", retval);
+    trace!("Retval = 0x{:x}", retval);
 
     // Put the return value into user_context.rax, except for syscalls that may
     // modify user_context directly. Currently, there are three such syscalls:
@@ -815,6 +825,20 @@ fn do_sysinfo(info: *mut sysinfo_t) -> Result<isize> {
     let info = unsafe { &mut *info };
     *info = misc::do_sysinfo()?;
     Ok(0)
+}
+
+fn do_getrandom(buf: *mut u8, len: size_t, flags: u32) -> Result<isize> {
+    check_mut_array(buf, len)?;
+    let checked_len = if len > u32::MAX as usize {
+        u32::MAX as usize
+    } else {
+        len
+    };
+    let rand_buf = unsafe { std::slice::from_raw_parts_mut(buf, checked_len) };
+    let flags = RandFlags::from_bits(flags).ok_or_else(|| errno!(EINVAL, "invalid flags"))?;
+
+    misc::do_getrandom(rand_buf, flags)?;
+    Ok(checked_len as isize)
 }
 
 // TODO: handle tz: timezone_t

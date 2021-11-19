@@ -9,6 +9,7 @@
 #![feature(alloc_layout_extra)]
 #![feature(concat_idents)]
 #![feature(trace_macros)]
+#![feature(drain_filter)]
 // for !Send in rw_lock
 #![feature(negative_impls)]
 // for may_dangle in rw_lock
@@ -21,6 +22,7 @@
 // for std::hint::black_box
 #![feature(test)]
 #![feature(atomic_from_mut)]
+#![feature(btree_drain_filter)]
 
 #[macro_use]
 extern crate alloc;
@@ -54,6 +56,9 @@ extern crate serde;
 extern crate serde_json;
 #[macro_use]
 extern crate memoffset;
+extern crate ctor;
+extern crate intrusive_collections;
+extern crate itertools;
 extern crate resolv_conf;
 
 use sgx_trts::libc;

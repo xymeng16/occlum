@@ -2,15 +2,25 @@ use crate::signal::constants::*;
 use std::intrinsics::atomic_store;
 
 use super::do_futex::futex_wake;
+use super::do_vfork::{is_vforked_child_process, vfork_return_to_parent};
+use super::pgrp::clean_pgrp_when_exit;
 use super::process::{Process, ProcessFilter};
 use super::{table, ProcessRef, TermStatus, ThreadRef, ThreadStatus};
 use crate::prelude::*;
 use crate::signal::{KernelSignal, SigNum};
+use crate::syscall::CpuContext;
+use crate::vm::USER_SPACE_VM_MANAGER;
 
-pub fn do_exit_group(status: i32) {
-    let term_status = TermStatus::Exited(status as u8);
-    current!().process().force_exit(term_status);
-    exit_thread(term_status);
+pub fn do_exit_group(status: i32, curr_user_ctxt: &mut CpuContext) -> Result<isize> {
+    if is_vforked_child_process() {
+        let current = current!();
+        return vfork_return_to_parent(curr_user_ctxt as *mut _, &current);
+    } else {
+        let term_status = TermStatus::Exited(status as u8);
+        current!().process().force_exit(term_status);
+        exit_thread(term_status);
+        Ok(0)
+    }
 }
 
 pub fn do_exit(status: i32) {
@@ -55,8 +65,9 @@ fn exit_thread(term_status: TermStatus) {
         table::del_thread(thread.tid()).expect("tid must be in the table");
     }
 
-    // If this thread is the last thread, then exit the process
+    // If this thread is the last thread, close all files then exit the process
     if num_remaining_threads == 0 {
+        thread.close_all_files();
         exit_process(&thread, term_status);
     }
 
@@ -93,6 +104,8 @@ fn exit_process(thread: &ThreadRef, term_status: TermStatus) {
     };
     // Lock the current process
     let mut process_inner = process.inner();
+    // Clean used VM
+    USER_SPACE_VM_MANAGER.free_chunks_when_exit(thread);
 
     // The parent is the idle process
     if parent_inner.is_none() {
@@ -102,6 +115,7 @@ fn exit_process(thread: &ThreadRef, term_status: TermStatus) {
         let main_tid = pid;
         table::del_thread(main_tid).expect("tid must be in the table");
         table::del_process(pid).expect("pid must be in the table");
+        clean_pgrp_when_exit(process);
 
         process_inner.exit(term_status, &idle_ref, &mut idle_inner);
         idle_inner.remove_zombie_child(pid);
@@ -190,6 +204,9 @@ fn exit_process_for_execve(
 
     // Lock the current process
     let mut process_inner = process.inner();
+    // Clean used VM
+    USER_SPACE_VM_MANAGER.free_chunks_when_exit(thread);
+
     let mut new_parent_inner = new_parent_ref.inner();
     let pid = process.pid();
 
